@@ -1,0 +1,22 @@
+# Bỏ qua môi trường ảo và thư viện Python
+backend/venv/
+backend/__pycache__/
+backend/.pytest_cache/
+
+# Bỏ qua file môi trường chứa API Key nhạy cảm
+backend/.env
+frontend/.env.local
+
+# Bỏ qua Database SQLite (để người khác tải về tự tạo DB trống)
+backend/*.db
+backend/pharmacy.db
+
+# Bỏ qua thư mục ảnh upload 
+backend/uploads/
+
+# Bỏ qua thư viện Node.js của Vue
+frontend/node_modules/
+frontend/dist/
+
+# File hệ thống
+.DS_Store
