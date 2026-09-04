@@ -1,11 +1,16 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import List, Optional
 from google import genai
 import os
 import json
 import re
+from datetime import date, timedelta
 from dotenv import load_dotenv
+from sqlalchemy.orm import Session
+
+from app.core.database import get_db
+from app.models import models
 
 # Tải các biến từ file .env
 load_dotenv()
@@ -19,7 +24,11 @@ class InteractionCheckRequest(BaseModel):
     medicines: List[str]
 
 @router.post("/consult")
-def consult_ai(request: AIQueryRequest):
+def consult_ai(request: AIQueryRequest, db: Session = Depends(get_db)):
+    """
+    Trợ lý AI Dược học kết hợp dữ liệu kho thuốc nội bộ theo thời gian thực (RAG thu nhỏ).
+    Có khả năng vừa trả lời chuyên môn y dược vừa tra cứu chính xác số lượng tồn và HSD các lô thuốc.
+    """
     try:
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
@@ -27,15 +36,44 @@ def consult_ai(request: AIQueryRequest):
         
         client = genai.Client(api_key=api_key)
         
+        # 1. Thu thập dữ liệu kho thuốc hiện có
+        medicines = db.query(models.Medicine).limit(100).all()
+        med_summary = []
+        for m in medicines:
+            med_summary.append(f"- {m.name}: Tồn kho {m.quantity or 0} {m.unit} (Mô tả: {m.description or 'Không'})")
+        inventory_context = "\n".join(med_summary) if med_summary else "Kho hiện chưa có danh mục thuốc."
+
+        # 2. Thu thập dữ liệu các lô hàng còn tồn kho xếp theo FEFO (hạn dùng gần nhất lên đầu)
+        batches = (
+            db.query(models.Batch, models.Medicine.name, models.Medicine.unit)
+            .join(models.Medicine, models.Batch.medicine_id == models.Medicine.id)
+            .filter(models.Batch.quantity > 0)
+            .order_by(models.Batch.expiry_date.asc())
+            .limit(30)
+            .all()
+        )
+        batch_summary = []
+        for b, m_name, m_unit in batches:
+            batch_summary.append(f"- Lô {b.batch_number} ({m_name}): Còn {b.quantity} {m_unit}, HSD: {b.expiry_date}")
+        batches_context = "\n".join(batch_summary) if batch_summary else "Hiện chưa có thông tin lô hàng."
+
+        # 3. Thiết lập System Instruction kết hợp dữ liệu thực tế
         system_instruction = (
-            "Bạn là trợ lý AI chuyên gia y tế và dược học cho hệ thống nhà thuốc. "
-            "Nhiệm vụ của bạn là hỗ trợ dược sĩ tra cứu thông tin thuốc, liều dùng và cảnh báo tương tác thuốc nguy hiểm. "
-            "Luôn đặt sự an toàn của bệnh nhân lên hàng đầu, từ chối đưa ra chẩn đoán thay thế bác sĩ."
+            "Bạn là trợ lý AI chuyên gia y tế và quản lý dược học cho hệ thống nhà thuốc.\n"
+            "DƯỚI ĐÂY LÀ DỮ LIỆU THỰC TẾ TRONG KHO THUỐC CỦA NHÀ THUỐC HIỆN TẠI:\n\n"
+            f"[DANH MỤC THUỐC & TỒN KHO]:\n{inventory_context}\n\n"
+            f"[CÁC LÔ HÀNG ĐANG CÒN HÀNG (SẮP XẾP THEO FEFO - HSD GẦN NHẤT ĐẾN XA NHẤT)]:\n{batches_context}\n\n"
+            "NGUYÊN TẮC TRẢ LỜI:\n"
+            "1. Nếu người dùng hỏi về số lượng tồn kho, tình trạng thuốc hay các lô thuốc sắp hết hạn: "
+            "hãy tra cứu và trả lời chính xác dựa trên dữ liệu thực tế đã cung cấp ở trên. Tuyệt đối không bịa số liệu kho.\n"
+            "2. Nếu người dùng hỏi về kiến thức chuyên môn y dược, tương tác thuốc, chỉ định, liều dùng: "
+            "hãy cung cấp thông tin chuẩn y khoa, chính xác, dễ hiểu và luôn nhắc nhở tuân theo chỉ định của bác sĩ.\n"
+            "3. Luôn giữ thái độ chuyên nghiệp, ngắn gọn và rõ ràng."
         )
         
         response = client.models.generate_content(
             model='gemini-2.5-flash',
-            contents=f"{system_instruction}\n\nCâu hỏi từ dược sĩ: {request.prompt}"
+            contents=f"{system_instruction}\n\nCâu hỏi từ người dùng: {request.prompt}"
         )
         
         return {"response": response.text}
@@ -85,7 +123,6 @@ YÊU CẦU:
         )
 
         raw_text = response.text.strip()
-        # Loại bỏ bọc code markdown nếu có
         cleaned_text = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_text, flags=re.MULTILINE).strip()
 
         try:
