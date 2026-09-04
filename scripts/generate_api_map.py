@@ -7,7 +7,7 @@ from datetime import datetime
 root_dir = Path(__file__).resolve().parent.parent
 backend_dir = root_dir / "backend"
 
-# Thêm backend vào sys.path để import được module app
+# Thêm backend vào sys.path để import được module app lúc runtime
 if str(backend_dir) not in sys.path:
     sys.path.insert(0, str(backend_dir))
 
@@ -20,7 +20,7 @@ except ImportError:
 
 # 2. Import FastAPI app
 try:
-    from app.main import app
+    from app.main import app  # type: ignore
     from fastapi.routing import APIRoute
 except Exception as e:
     print(f"[LỖI] Không thể nạp ứng dụng FastAPI từ app.main: {e}")
@@ -71,7 +71,6 @@ def extract_rbac(route: APIRoute) -> str:
         if "current_user" in func_name or "auth" in func_name.lower():
             is_auth_required = True
 
-    # Loại bỏ trùng lặp vai trò
     unique_roles = []
     for r in roles:
         if r not in unique_roles:
@@ -91,7 +90,6 @@ def generate_api_map():
 
     for route in app.routes:
         if isinstance(route, APIRoute):
-            # Bỏ qua các endpoint mặc định của OpenAPI docs
             if route.path in ["/docs", "/redoc", "/openapi.json"]:
                 continue
 
@@ -99,10 +97,8 @@ def generate_api_map():
             methods = [m for m in route.methods if m not in {"HEAD", "OPTIONS"}]
             method_str = ", ".join(methods)
             
-            # Lấy nhóm từ tags hoặc từ tiền tố URL
             tag = route.tags[0] if route.tags else "General"
             
-            # Lấy mô tả tóm tắt
             summary = route.summary or ""
             if not summary and route.endpoint.__doc__:
                 summary = route.endpoint.__doc__.strip().split("\n")[0]
@@ -123,7 +119,6 @@ def generate_api_map():
                 "roles": roles_str
             })
 
-    # Xây dựng nội dung Markdown
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     lines = [
         "# BẢN ĐỒ API & PHÂN QUYỀN (API MAP & RBAC)\n",
