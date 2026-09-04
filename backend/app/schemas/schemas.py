@@ -4,7 +4,7 @@ from datetime import datetime, date
 from app.models.models import RoleEnum
 
 # ==========================
-# 1. User Schemas
+# 1. User & Auth Schemas
 # ==========================
 class UserBase(BaseModel):
     username: str
@@ -18,6 +18,15 @@ class UserResponse(UserBase):
     id: int
 
     model_config = ConfigDict(from_attributes=True)
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    role: str
 
 # ==========================
 # 2. Category Schemas
@@ -35,13 +44,32 @@ class CategoryResponse(CategoryBase):
     model_config = ConfigDict(from_attributes=True)
 
 # ==========================
-# 3. Medicine Schemas
+# 3. Supplier Schemas (MỚI)
+# ==========================
+class SupplierBase(BaseModel):
+    name: str
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    address: Optional[str] = None
+
+class SupplierCreate(SupplierBase):
+    pass
+
+class SupplierResponse(SupplierBase):
+    id: int
+
+    model_config = ConfigDict(from_attributes=True)
+
+# ==========================
+# 4. Medicine Schemas (Đã hợp nhất)
 # ==========================
 class MedicineBase(BaseModel):
     name: str
     category_id: int
     unit: str
     description: Optional[str] = None
+    quantity: int = 0
+    image_url: Optional[str] = None
     is_approved: Optional[int] = 0
 
 class MedicineCreate(MedicineBase):
@@ -53,37 +81,34 @@ class MedicineResponse(MedicineBase):
 
     model_config = ConfigDict(from_attributes=True)
 
-class MedicineBase(BaseModel):
-    name: str
-    unit: str
-    category_id: int
-    description: Optional[str] = None
-    quantity: int = 0  # <--- Bổ sung dòng này
-
 # ==========================
-# 4. Batch Schemas
+# 5. Batch Schemas (Lô thuốc & Hạn dùng)
 # ==========================
 class BatchBase(BaseModel):
     medicine_id: int
     batch_number: str
     expiry_date: date
-    quantity: int = Field(ge=0, description="Số lượng không được âm")
-    import_price: float = Field(ge=0)
-    sell_price: float = Field(ge=0)
+    quantity: int = Field(default=0, ge=0, description="Số lượng không được âm")
+    import_price: float = Field(default=0.0, ge=0)
+    sell_price: float = Field(default=0.0, ge=0)
     supplier: Optional[str] = None
+    supplier_id: Optional[int] = None
+    manufacturing_date: Optional[date] = None
 
 class BatchCreate(BatchBase):
     pass
 
 class BatchResponse(BatchBase):
     id: int
-    import_date: datetime
+    import_date: Optional[datetime] = None
+    current_quantity: Optional[int] = None
+    initial_quantity: Optional[int] = None
     medicine: Optional[MedicineResponse] = None
 
     model_config = ConfigDict(from_attributes=True)
 
 # ==========================
-# 5. Invoice Schemas (Hóa đơn & Chi tiết)
+# 6. Invoice Schemas (Hóa đơn & Bán hàng)
 # ==========================
 class InvoiceDetailBase(BaseModel):
     batch_id: int
@@ -103,7 +128,6 @@ class InvoiceBase(BaseModel):
     user_id: int
 
 class InvoiceCreate(InvoiceBase):
-    # Khi tạo hóa đơn, Frontend sẽ gửi lên danh sách các mặt hàng (batch) cần bán
     details: List[InvoiceDetailCreate]
 
 class InvoiceResponse(InvoiceBase):
@@ -115,34 +139,25 @@ class InvoiceResponse(InvoiceBase):
     model_config = ConfigDict(from_attributes=True)
 
 # ==========================
-# 6. AI & Báo cáo Schemas
-# ==========================
-class AIQueryRequest(BaseModel):
-    query: str
-    context_type: str = Field(..., description="Loại context: 'medicine_info', 'sop', 'expiry_report'")
-    medicine_id: Optional[int] = None
-
-class AIQueryResponse(BaseModel):
-    result: str
-    warning: str = "LƯU Ý: Đây là thông tin tham khảo từ AI. Không thay thế lời khuyên y tế của Dược sĩ/Bác sĩ."
-    # ==========================
-# 7. Cart & Checkout Schemas (MỚI)
+# 7. Cart & Checkout Schemas
 # ==========================
 class CartItem(BaseModel):
     medicine_id: int
     quantity: int = Field(gt=0, description="Số lượng mua phải lớn hơn 0")
 
 class CheckoutRequest(BaseModel):
-    user_id: int # ID của thu ngân (Sau này sẽ lấy tự động từ JWT Token)
+    user_id: int
     items: List[CartItem]
-# ==========================
-# 8. Auth & Login Schemas (MỚI)
-# ==========================
-class LoginRequest(BaseModel):
-    username: str
-    password: str
 
-class TokenResponse(BaseModel):
-    access_token: str
-    token_type: str = "bearer"
-    role: str
+# ==========================
+# 8. AI & Báo cáo Schemas
+# ==========================
+class AIQueryRequest(BaseModel):
+    query: Optional[str] = None
+    prompt: Optional[str] = None
+    context_type: Optional[str] = Field(default="medicine_info", description="Loại context: 'medicine_info', 'sop', 'expiry_report'")
+    medicine_id: Optional[int] = None
+
+class AIQueryResponse(BaseModel):
+    result: str
+    warning: str = "LƯU Ý: Đây là thông tin tham khảo từ AI. Không thay thế lời khuyên y tế của Dược sĩ/Bác sĩ."

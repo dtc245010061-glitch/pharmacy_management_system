@@ -1,12 +1,30 @@
 <template>
   <div class="med-container">
+    <!-- Sidebar điều hướng phân quyền theo vai trò -->
     <div class="sidebar">
       <h3>Quản lý Nhà thuốc</h3>
+      
+      <!-- Thông tin tài khoản đăng nhập -->
+      <div class="user-badge-box">
+        <span class="username-text">👤 {{ currentUsername }}</span>
+        <span :class="['role-badge', `badge-${userRole}`]">{{ roleLabel }}</span>
+      </div>
+
       <ul>
+        <li v-if="['manager', 'pharmacist'].includes(userRole)" @click="$router.push('/dashboard')">
+          Trang chủ
+        </li>
         <li class="active">Quản lý Thuốc</li>
-        <li @click="$router.push('/dashboard')">Trang chủ</li>
+        <li v-if="['manager', 'pharmacist'].includes(userRole)" @click="$router.push('/batches')">
+          Quản lý Lô & HSD
+        </li>
+        <li v-if="userRole === 'manager'" @click="$router.push('/suppliers')">
+          Nhà cung cấp
+        </li>
         <li @click="$router.push('/pos')">Bán hàng (POS)</li>
-        <li @click="$router.push('/ai-chat')">Trợ lý AI</li>
+        <li v-if="['manager', 'pharmacist'].includes(userRole)" @click="$router.push('/ai-chat')">
+          Trợ lý AI
+        </li>
         <li @click="logout" style="color: #e74c3c; cursor: pointer;">Đăng xuất</li>
       </ul>
     </div>
@@ -14,13 +32,12 @@
     <div class="main-content">
       <h2>Danh mục & Quản lý Thuốc</h2>
 
-      <!-- Form thêm thuốc -->
-      <div class="form-card">
+      <!-- Form thêm thuốc (Ẩn đối với Thu ngân) -->
+      <div class="form-card" v-if="userRole !== 'cashier'">
         <h3>Thêm thuốc mới</h3>
         <form @submit.prevent="createMedicine" class="inline-form">
           <input type="text" v-model="form.name" placeholder="Tên thuốc..." required />
           <input type="text" v-model="form.unit" placeholder="Đơn vị tính..." required />
-          <!-- Thêm ô nhập số lượng -->
           <input type="number" v-model.number="form.quantity" placeholder="Số lượng..." required min="0" />
           <input type="number" v-model.number="form.category_id" placeholder="ID Danh mục..." required />
           <input type="text" v-model="form.description" placeholder="Mô tả..." />
@@ -37,28 +54,30 @@
               <th>ID</th>
               <th>Tên thuốc</th>
               <th>Đơn vị</th>
-              <th>Số lượng</th> <!-- Thêm cột hiển thị số lượng -->
+              <th>Số lượng</th>
               <th>Mô tả</th>
-              <th>Ảnh thuốc</th>
-              <th>Thao tác</th>
+              <th v-if="userRole !== 'cashier'">Ảnh thuốc</th>
+              <th v-if="userRole === 'manager'">Thao tác</th>
             </tr>
           </thead>
           <tbody>
             <tr v-for="med in medicines" :key="med.id">
               <td>{{ med.id }}</td>
-              <td>{{ med.name }}</td>
+              <td><strong>{{ med.name }}</strong></td>
               <td>{{ med.unit }}</td>
-              <td><strong>{{ med.quantity || 0 }}</strong></td> <!-- Hiển thị dữ liệu -->
+              <td><strong>{{ med.quantity || 0 }}</strong></td>
               <td>{{ med.description || 'Không có mô tả' }}</td>
-              <td>
+              <td v-if="userRole !== 'cashier'">
                 <input type="file" @change="(e) => handleFileUpload(e, med.id)" accept="image/*" style="font-size: 12px;" />
               </td>
-              <td>
+              <td v-if="userRole === 'manager'">
                 <button @click="deleteMedicine(med.id)" class="btn-delete">Xóa</button>
               </td>
             </tr>
             <tr v-if="medicines.length === 0">
-              <td colspan="7" style="text-align: center;">Chưa có dữ liệu thuốc trong hệ thống.</td>
+              <td :colspan="userRole === 'manager' ? 7 : (userRole === 'cashier' ? 5 : 6)" style="text-align: center;">
+                Chưa có dữ liệu thuốc trong hệ thống.
+              </td>
             </tr>
           </tbody>
         </table>
@@ -68,16 +87,28 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue';
+import { ref, computed, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import api from '../services/api';
 
 const router = useRouter();
 const medicines = ref([]);
+const userRole = ref(localStorage.getItem('role') || 'cashier');
+const currentUsername = ref(localStorage.getItem('username') || 'Người dùng');
+
+const roleLabel = computed(() => {
+  switch (userRole.value) {
+    case 'manager': return 'Quản lý';
+    case 'pharmacist': return 'Dược sĩ';
+    case 'cashier': return 'Thu ngân';
+    default: return userRole.value;
+  }
+});
+
 const form = ref({
   name: '',
   unit: '',
-  quantity: 0, // Bổ sung trường quantity vào state
+  quantity: 0,
   category_id: 1,
   description: ''
 });
@@ -97,7 +128,7 @@ const createMedicine = async () => {
     alert('Thêm thuốc thành công!');
     form.value.name = '';
     form.value.unit = '';
-    form.value.quantity = 0; // Reset số lượng sau khi thêm
+    form.value.quantity = 0;
     form.value.description = '';
     fetchMedicines();
   } catch (error) {
@@ -110,7 +141,7 @@ const createMedicine = async () => {
         errorMsg = error.response.data.detail;
       }
     }
-    alert('Lỗi chi tiết từ Backend:\n' + errorMsg);
+    alert('Lỗi từ máy chủ:\n' + errorMsg);
   }
 };
 
@@ -140,7 +171,7 @@ const deleteMedicine = async (id) => {
       await api.delete(`/medicines/${id}`);
       fetchMedicines();
     } catch (error) {
-      alert('Không thể xóa thuốc này.');
+      alert('Lỗi: ' + (error.response?.data?.detail || 'Không thể xóa thuốc này'));
     }
   }
 };
@@ -157,16 +188,26 @@ onMounted(() => {
 
 <style scoped>
 .med-container { display: flex; height: 100vh; background-color: #f4f7f6; }
-.sidebar { width: 250px; background-color: #2c3e50; color: white; padding: 20px; }
-.sidebar h3 { text-align: center; margin-bottom: 30px; }
+.sidebar { width: 250px; background-color: #2c3e50; color: white; padding: 20px; flex-shrink: 0; }
+.sidebar h3 { text-align: center; margin-bottom: 15px; }
+
+.user-badge-box { background-color: #1a252f; padding: 10px 12px; border-radius: 6px; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center; }
+.username-text { font-size: 13px; font-weight: 500; }
+.role-badge { font-size: 11px; padding: 2px 8px; border-radius: 10px; font-weight: bold; text-transform: uppercase; }
+.badge-manager { background-color: #e74c3c; color: white; }
+.badge-pharmacist { background-color: #3498db; color: white; }
+.badge-cashier { background-color: #27ae60; color: white; }
+
 .sidebar ul { list-style: none; padding: 0; }
 .sidebar li { padding: 10px 15px; margin-bottom: 10px; border-radius: 4px; cursor: pointer; }
 .sidebar li:hover, .sidebar li.active { background-color: #34495e; }
+
 .main-content { flex: 1; padding: 30px; overflow-y: auto; }
 .form-card, .table-card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); margin-bottom: 20px; }
-.inline-form { display: flex; gap: 10px; margin-top: 15px; }
-.inline-form input { flex: 1; padding: 8px; border: 1px solid #ccc; border-radius: 4px; }
+.inline-form { display: flex; gap: 10px; margin-top: 15px; flex-wrap: wrap; }
+.inline-form input { flex: 1; min-width: 140px; padding: 8px; border: 1px solid #ccc; border-radius: 4px; }
 .inline-form button { background-color: #42b983; color: white; border: none; padding: 8px 15px; border-radius: 4px; cursor: pointer; font-weight: bold; min-width: 120px; }
+
 table { width: 100%; border-collapse: collapse; margin-top: 15px; }
 th, td { border: 1px solid #ddd; padding: 10px; text-align: left; }
 th { background-color: #f8f9fa; }
