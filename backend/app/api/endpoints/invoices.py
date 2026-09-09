@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
-from typing import List, Any, Dict
+from typing import List, Any, Dict, Optional
 from datetime import datetime
 
 from app.core.database import get_db
@@ -11,82 +12,106 @@ from app.models.models import RoleEnum
 
 router = APIRouter()
 
+class POSCheckoutItem(BaseModel):
+    medicine_id: int
+    quantity: int = Field(gt=0, description="Số lượng mua phải lớn hơn 0")
+
+class POSCheckoutRequest(BaseModel):
+    items: List[POSCheckoutItem]
+    user_id: Optional[int] = None
+
 @router.post("/", response_model=schemas.InvoiceResponse, status_code=status.HTTP_201_CREATED)
 def create_invoice(
-    invoice_in: schemas.InvoiceCreate, 
+    invoice_in: POSCheckoutRequest, 
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_roles([RoleEnum.manager, RoleEnum.pharmacist, RoleEnum.cashier]))
 ):
+    """
+    Thanh toán đơn hàng và tự động trừ kho theo chuẩn FEFO (First Expired, First Out).
+    """
+    if not invoice_in.items:
+        raise HTTPException(status_code=400, detail="Giỏ hàng không có sản phẩm để thanh toán.")
+
     total_amount = 0.0
-    invoice_items_data = []
+    details_to_create = []
 
     for item in invoice_in.items:
-        medicine = db.query(models.Medicine).filter(models.Medicine.id == item.medicine_id).first()
-        if not medicine:
+        # 1. Kiểm tra sự tồn tại của thuốc (chỉ chọn cột có sẵn trong CSDL vật lý)
+        med = (
+            db.query(models.Medicine.id, models.Medicine.name)
+            .filter(models.Medicine.id == item.medicine_id)
+            .first()
+        )
+        if not med:
             raise HTTPException(status_code=404, detail=f"Không tìm thấy thuốc ID: {item.medicine_id}")
         
-        # Lấy danh sách các lô còn hàng, sắp xếp theo hạn sử dụng tăng dần (FEFO)
-        batches = db.query(models.Batch).filter(
-            models.Batch.medicine_id == item.medicine_id,
-            models.Batch.quantity > 0
-        ).order_by(models.Batch.expiry_date.asc()).all()
+        # 2. Lấy danh sách các lô còn hàng, sắp xếp theo HSD tăng dần (FEFO)
+        batches = (
+            db.query(
+                models.Batch.id,
+                models.Batch.batch_number,
+                models.Batch.quantity,
+                models.Batch.sell_price,
+                models.Batch.expiry_date
+            )
+            .filter(
+                models.Batch.medicine_id == item.medicine_id,
+                models.Batch.quantity > 0
+            )
+            .order_by(models.Batch.expiry_date.asc())
+            .all()
+        )
 
         total_available = sum(b.quantity for b in batches)
         if total_available < item.quantity:
             raise HTTPException(
                 status_code=400, 
-                detail=f"Thuốc '{medicine.name}' không đủ tồn kho. Tồn hiện tại: {total_available}, Yêu cầu: {item.quantity}"
+                detail=f"Thuốc '{med.name}' không đủ tồn kho. Tồn hiện tại: {total_available}, Yêu cầu: {item.quantity}"
             )
         
-        # Tiến hành trừ kho theo nguyên tắc FEFO
+        # 3. Trừ kho từng lô theo nguyên tắc FEFO
         remaining_to_deduct = item.quantity
-        item_total_price = 0.0
 
-        for batch in batches:
+        for b in batches:
             if remaining_to_deduct <= 0:
                 break
             
-            if batch.quantity >= remaining_to_deduct:
-                batch.quantity -= remaining_to_deduct
-                item_total_price += remaining_to_deduct * batch.sale_price
-                remaining_to_deduct = 0
-            else:
-                deduct = batch.quantity
-                remaining_to_deduct -= deduct
-                item_total_price += deduct * batch.sale_price
-                batch.quantity = 0
-            
-            db.add(batch)
+            deduct_qty = min(b.quantity, remaining_to_deduct)
+            new_batch_qty = b.quantity - deduct_qty
+            remaining_to_deduct -= deduct_qty
 
-        # Cập nhật đồng bộ tổng số lượng tồn kho của loại thuốc
-        medicine.quantity = max(0, (medicine.quantity or 0) - item.quantity)
-        db.add(medicine)
+            # Cập nhật số lượng tồn của lô vào CSDL
+            db.query(models.Batch).filter(models.Batch.id == b.id).update(
+                {models.Batch.quantity: new_batch_qty}
+            )
 
-        total_amount += item_total_price
-        invoice_items_data.append({
-            "medicine_id": item.medicine_id,
-            "quantity": item.quantity,
-            "unit_price": item_total_price / item.quantity if item.quantity > 0 else 0
-        })
+            line_price = b.sell_price or 0.0
+            total_amount += deduct_qty * line_price
 
-    # Lưu hóa đơn vào cơ sở dữ liệu
+            details_to_create.append({
+                "batch_id": b.id,
+                "quantity": deduct_qty,
+                "price": line_price
+            })
+
+    # 4. Lưu hóa đơn vào cơ sở dữ liệu
     db_invoice = models.Invoice(
-        total_amount=total_amount,
+        user_id=current_user.id,
+        total_amount=round(total_amount, 2),
         created_at=datetime.utcnow()
     )
     db.add(db_invoice)
-    db.commit()
-    db.refresh(db_invoice)
+    db.flush()
 
-    # Lưu chi tiết hóa đơn
-    for itm in invoice_items_data:
-        db_item = models.InvoiceItem(
+    # 5. Lưu chi tiết hóa đơn theo từng lô xuất kho
+    for d in details_to_create:
+        db_detail = models.InvoiceDetail(
             invoice_id=db_invoice.id,
-            medicine_id=itm["medicine_id"],
-            quantity=itm["quantity"],
-            unit_price=itm["unit_price"]
+            batch_id=d["batch_id"],
+            quantity=d["quantity"],
+            price=d["price"]
         )
-        db.add(db_item)
+        db.add(db_detail)
     
     db.commit()
     db.refresh(db_invoice)
@@ -115,28 +140,38 @@ def get_invoice_detail(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_roles([RoleEnum.manager, RoleEnum.pharmacist, RoleEnum.cashier]))
 ) -> Dict[str, Any]:
-    """Lấy chi tiết từng dòng thuốc trong hóa đơn kèm tên thuốc và đơn vị tính"""
+    """Lấy chi tiết từng dòng thuốc trong hóa đơn kèm thông tin lô và đơn vị tính"""
     invoice = db.query(models.Invoice).filter(models.Invoice.id == invoice_id).first()
     if not invoice:
         raise HTTPException(status_code=404, detail="Không tìm thấy hóa đơn")
 
     items = (
-        db.query(models.InvoiceItem, models.Medicine.name, models.Medicine.unit)
-        .join(models.Medicine, models.InvoiceItem.medicine_id == models.Medicine.id)
-        .filter(models.InvoiceItem.invoice_id == invoice_id)
+        db.query(
+            models.InvoiceDetail.id,
+            models.InvoiceDetail.quantity,
+            models.InvoiceDetail.price,
+            models.Medicine.id.label("medicine_id"),
+            models.Medicine.name.label("medicine_name"),
+            models.Medicine.unit.label("unit"),
+            models.Batch.batch_number.label("batch_number")
+        )
+        .join(models.Batch, models.InvoiceDetail.batch_id == models.Batch.id)
+        .join(models.Medicine, models.Batch.medicine_id == models.Medicine.id)
+        .filter(models.InvoiceDetail.invoice_id == invoice_id)
         .all()
     )
 
     detail_items = []
-    for item, med_name, med_unit in items:
+    for item in items:
         detail_items.append({
             "id": item.id,
             "medicine_id": item.medicine_id,
-            "medicine_name": med_name,
-            "unit": med_unit,
+            "medicine_name": item.medicine_name,
+            "unit": item.unit,
+            "batch_number": item.batch_number,
             "quantity": item.quantity,
-            "unit_price": item.unit_price,
-            "subtotal": round(item.quantity * item.unit_price, 2)
+            "unit_price": item.price,
+            "subtotal": round(item.quantity * item.price, 2)
         })
 
     return {

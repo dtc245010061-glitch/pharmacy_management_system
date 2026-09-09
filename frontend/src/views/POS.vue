@@ -92,8 +92,13 @@
             </tbody>
           </table>
 
+          <!-- Trạng thái đang quét tự động -->
+          <div v-if="isCheckingAI" class="ai-alert-box ai-alert-scanning">
+            🤖 <strong>AI Guardrail:</strong> Đang phân tích tương tác chéo giữa các loại thuốc trong đơn...
+          </div>
+
           <!-- Khung cảnh báo AI Guardrail khi có kết quả quét -->
-          <div v-if="interactionResult" :class="['ai-alert-box', `ai-alert-${interactionResult.severity}`]">
+          <div v-else-if="interactionResult" :class="['ai-alert-box', `ai-alert-${interactionResult.severity}`]">
             <div class="ai-alert-title">
               <strong>{{ getSeverityTitle(interactionResult.severity) }}</strong>
             </div>
@@ -111,7 +116,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue';
+import { ref, computed, onMounted, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import api from '../services/api';
 
@@ -122,6 +127,7 @@ const searchQuery = ref('');
 
 const isCheckingAI = ref(false);
 const interactionResult = ref(null);
+let debounceTimer = null;
 
 const userRole = ref(localStorage.getItem('role') || 'cashier');
 const currentUsername = ref(localStorage.getItem('username') || 'Thu ngân');
@@ -149,7 +155,6 @@ const filteredMedicines = computed(() => {
 });
 
 const addToCart = (med) => {
-  interactionResult.value = null;
   const existing = cart.value.find(item => item.medicine_id === med.id);
   if (existing) {
     existing.quantity += 1;
@@ -164,8 +169,27 @@ const addToCart = (med) => {
 
 const removeFromCart = (index) => {
   cart.value.splice(index, 1);
-  interactionResult.value = null;
 };
+
+// Tự động quét tương tác thuốc khi danh mục thuốc trong giỏ hàng thay đổi (thêm/bớt)
+watch(
+  () => cart.value.map(item => item.medicine_id).join(','),
+  () => {
+    if (debounceTimer) {
+      clearTimeout(debounceTimer);
+    }
+
+    if (cart.value.length < 2) {
+      interactionResult.value = null;
+      isCheckingAI.value = false;
+      return;
+    }
+
+    debounceTimer = setTimeout(() => {
+      checkDrugInteractions();
+    }, 600);
+  }
+);
 
 const checkDrugInteractions = async () => {
   if (cart.value.length < 2) return;
@@ -177,7 +201,7 @@ const checkDrugInteractions = async () => {
     });
     interactionResult.value = res.data;
   } catch (error) {
-    alert('Không thể kết nối AI kiểm tra tương tác: ' + (error.response?.data?.detail || 'Lỗi mạng'));
+    console.error('Lỗi kiểm tra tương tác thuốc:', error);
   } finally {
     isCheckingAI.value = false;
   }
@@ -270,6 +294,7 @@ th { background-color: #f8f9fa; }
 .btn-remove { background-color: #e74c3c; color: white; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; }
 
 .ai-alert-box { padding: 12px 15px; border-radius: 6px; margin-bottom: 15px; font-size: 13px; line-height: 1.5; }
+.ai-alert-scanning { background-color: #ebf5fb; border-left: 4px solid #3498db; color: #2980b9; font-style: italic; }
 .ai-alert-safe { background-color: #e8f8f5; border-left: 4px solid #27ae60; color: #1e8449; }
 .ai-alert-warning { background-color: #fef9e7; border-left: 4px solid #f39c12; color: #b7950b; }
 .ai-alert-danger { background-color: #fdedec; border-left: 4px solid #e74c3c; color: #c0392b; }

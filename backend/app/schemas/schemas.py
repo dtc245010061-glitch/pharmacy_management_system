@@ -44,7 +44,7 @@ class CategoryResponse(CategoryBase):
     model_config = ConfigDict(from_attributes=True)
 
 # ==========================
-# 3. Supplier Schemas (MỚI)
+# 3. Supplier Schemas
 # ==========================
 class SupplierBase(BaseModel):
     name: str
@@ -61,16 +61,24 @@ class SupplierResponse(SupplierBase):
     model_config = ConfigDict(from_attributes=True)
 
 # ==========================
-# 4. Medicine Schemas (Đã hợp nhất)
+# 4. Medicine Schemas (Chuẩn GPP & AI Vision)
 # ==========================
 class MedicineBase(BaseModel):
     name: str
     category_id: int
     unit: str
+    price: Optional[float] = 0.0
     description: Optional[str] = None
     quantity: int = 0
     image_url: Optional[str] = None
     is_approved: Optional[int] = 0
+    
+    registration_number: Optional[str] = None
+    ingredients: Optional[str] = None
+    dosage_form: Optional[str] = None
+    packaging: Optional[str] = None
+    manufacturer: Optional[str] = None
+    country: Optional[str] = None
 
 class MedicineCreate(MedicineBase):
     pass
@@ -81,8 +89,23 @@ class MedicineResponse(MedicineBase):
 
     model_config = ConfigDict(from_attributes=True)
 
+class MedicineScanResponse(BaseModel):
+    name: Optional[str] = None
+    registration_number: Optional[str] = None
+    ingredients: Optional[str] = None
+    dosage_form: Optional[str] = None
+    packaging: Optional[str] = None
+    unit: Optional[str] = None
+    manufacturer: Optional[str] = None
+    country: Optional[str] = None
+    category_suggestion: Optional[str] = None
+    expiry_date: Optional[str] = None
+    estimated_price: Optional[float] = 0.0
+    description: Optional[str] = None
+    image_url: Optional[str] = None
+
 # ==========================
-# 5. Batch Schemas (Lô thuốc & Hạn dùng)
+# 5. Batch Schemas
 # ==========================
 class BatchBase(BaseModel):
     medicine_id: int
@@ -108,7 +131,7 @@ class BatchResponse(BatchBase):
     model_config = ConfigDict(from_attributes=True)
 
 # ==========================
-# 6. Invoice Schemas (Hóa đơn & Bán hàng)
+# 6. Invoice Schemas
 # ==========================
 class InvoiceDetailBase(BaseModel):
     batch_id: int
@@ -139,23 +162,12 @@ class InvoiceResponse(InvoiceBase):
     model_config = ConfigDict(from_attributes=True)
 
 # ==========================
-# 7. Cart & Checkout Schemas
-# ==========================
-class CartItem(BaseModel):
-    medicine_id: int
-    quantity: int = Field(gt=0, description="Số lượng mua phải lớn hơn 0")
-
-class CheckoutRequest(BaseModel):
-    user_id: int
-    items: List[CartItem]
-
-# ==========================
-# 8. AI & Báo cáo Schemas
+# 7. AI Query Schemas
 # ==========================
 class AIQueryRequest(BaseModel):
     query: Optional[str] = None
     prompt: Optional[str] = None
-    context_type: Optional[str] = Field(default="medicine_info", description="Loại context: 'medicine_info', 'sop', 'expiry_report'")
+    context_type: Optional[str] = Field(default="medicine_info")
     medicine_id: Optional[int] = None
 
 class AIQueryResponse(BaseModel):

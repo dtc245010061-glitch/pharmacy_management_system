@@ -44,11 +44,20 @@ class Medicine(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(255), index=True, nullable=False)
     category_id = Column(Integer, ForeignKey("categories.id"))
-    unit = Column(String(50), nullable=False) # Hộp, Vỉ, Viên...
-    description = Column(Text) # Thông tin thuốc chuẩn để đưa cho AI
-    is_approved = Column(Integer, default=0) # 1: Đã được dược sĩ duyệt để AI dùng
-    quantity = Column(Integer, default=0) # Tổng tồn kho tích lũy
+    unit = Column(String(50), nullable=False) # Hộp, Vỉ, Viên, Chai...
+    price = Column(Float, default=0.0, nullable=True) # Giá bán cơ bản / tham khảo
+    description = Column(Text, nullable=True) # Mô tả, công dụng và chỉ định
+    is_approved = Column(Integer, default=0) # 1: Đã được dược sĩ duyệt
+    quantity = Column(Integer, default=0) # Tồn kho tích lũy
     image_url = Column(String(255), nullable=True) # Đường dẫn ảnh thuốc
+    
+    # Các trường thông tin y tế chuẩn GPP trích xuất từ AI Vision
+    registration_number = Column(String(100), index=True, nullable=True) # Số đăng ký (SĐK)
+    ingredients = Column(Text, nullable=True) # Thành phần hoạt chất & hàm lượng
+    dosage_form = Column(String(100), nullable=True) # Dạng bào chế
+    packaging = Column(String(255), nullable=True) # Quy cách đóng gói
+    manufacturer = Column(String(255), nullable=True) # Nhà sản xuất
+    country = Column(String(100), nullable=True) # Nước sản xuất
     
     category = relationship("Category", back_populates="medicines")
     batches = relationship("Batch", back_populates="medicine")
@@ -58,14 +67,14 @@ class Batch(Base):
     
     id = Column(Integer, primary_key=True, index=True)
     medicine_id = Column(Integer, ForeignKey("medicines.id"))
-    supplier_id = Column(Integer, ForeignKey("suppliers.id"), nullable=True) # Khóa ngoại sang bảng Supplier
+    supplier_id = Column(Integer, ForeignKey("suppliers.id"), nullable=True)
     batch_number = Column(String(100), index=True, nullable=False)
     import_date = Column(DateTime, default=datetime.utcnow)
     expiry_date = Column(Date, nullable=False)
-    quantity = Column(Integer, nullable=False) # Số lượng tồn kho hiện tại của lô
+    quantity = Column(Integer, nullable=False)
     import_price = Column(Float, nullable=False)
     sell_price = Column(Float, nullable=False)
-    supplier = Column(String(255), nullable=True) # Giữ nguyên trường text cũ để tương thích
+    supplier = Column(String(255), nullable=True)
     
     medicine = relationship("Medicine", back_populates="batches")
     supplier_ref = relationship("Supplier", back_populates="batches")
@@ -75,7 +84,7 @@ class Invoice(Base):
     __tablename__ = "invoices"
     
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id")) # Thu ngân tạo hóa đơn
+    user_id = Column(Integer, ForeignKey("users.id"))
     created_at = Column(DateTime, default=datetime.utcnow)
     total_amount = Column(Float, default=0.0)
     
@@ -88,7 +97,7 @@ class InvoiceDetail(Base):
     invoice_id = Column(Integer, ForeignKey("invoices.id"))
     batch_id = Column(Integer, ForeignKey("batches.id"))
     quantity = Column(Integer, nullable=False)
-    price = Column(Float, nullable=False) # Lưu cứng giá bán tại thời điểm lập hóa đơn
+    price = Column(Float, nullable=False)
     
     invoice = relationship("Invoice", back_populates="details")
     batch = relationship("Batch", back_populates="invoice_details")

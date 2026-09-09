@@ -1,21 +1,28 @@
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, UploadFile, File
 from pydantic import BaseModel
 from typing import List, Optional
 from google import genai
+from google.genai import types
 import os
 import json
 import re
+import uuid
+import shutil
+from pathlib import Path
 from datetime import date, timedelta
 from dotenv import load_dotenv
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 
 from app.core.database import get_db
 from app.models import models
 
-# Tải các biến từ file .env
 load_dotenv()
 
 router = APIRouter()
+
+UPLOAD_DIR = Path("uploads/medicines")
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 class AIQueryRequest(BaseModel):
     prompt: str
@@ -27,7 +34,6 @@ class InteractionCheckRequest(BaseModel):
 def consult_ai(request: AIQueryRequest, db: Session = Depends(get_db)):
     """
     Trợ lý AI Dược học kết hợp dữ liệu kho thuốc nội bộ theo thời gian thực (RAG thu nhỏ).
-    Có khả năng vừa trả lời chuyên môn y dược vừa tra cứu chính xác số lượng tồn và HSD các lô thuốc.
     """
     try:
         api_key = os.getenv("GEMINI_API_KEY")
@@ -36,16 +42,42 @@ def consult_ai(request: AIQueryRequest, db: Session = Depends(get_db)):
         
         client = genai.Client(api_key=api_key)
         
-        # 1. Thu thập dữ liệu kho thuốc hiện có
-        medicines = db.query(models.Medicine).limit(100).all()
+        medicines = (
+            db.query(
+                models.Medicine.id,
+                models.Medicine.name,
+                models.Medicine.unit,
+                models.Medicine.description
+            )
+            .limit(100)
+            .all()
+        )
+
+        batch_stocks = (
+            db.query(
+                models.Batch.medicine_id,
+                func.sum(models.Batch.quantity).label("total_qty")
+            )
+            .filter(models.Batch.quantity > 0)
+            .group_by(models.Batch.medicine_id)
+            .all()
+        )
+        stock_map = {row.medicine_id: (row.total_qty or 0) for row in batch_stocks}
+
         med_summary = []
         for m in medicines:
-            med_summary.append(f"- {m.name}: Tồn kho {m.quantity or 0} {m.unit} (Mô tả: {m.description or 'Không'})")
+            stock_qty = stock_map.get(m.id, 0)
+            med_summary.append(f"- {m.name}: Tồn kho {stock_qty} {m.unit or 'đơn vị'} (Mô tả: {m.description or 'Không'})")
         inventory_context = "\n".join(med_summary) if med_summary else "Kho hiện chưa có danh mục thuốc."
 
-        # 2. Thu thập dữ liệu các lô hàng còn tồn kho xếp theo FEFO (hạn dùng gần nhất lên đầu)
         batches = (
-            db.query(models.Batch, models.Medicine.name, models.Medicine.unit)
+            db.query(
+                models.Batch.batch_number,
+                models.Batch.quantity,
+                models.Batch.expiry_date,
+                models.Medicine.name,
+                models.Medicine.unit
+            )
             .join(models.Medicine, models.Batch.medicine_id == models.Medicine.id)
             .filter(models.Batch.quantity > 0)
             .order_by(models.Batch.expiry_date.asc())
@@ -53,11 +85,10 @@ def consult_ai(request: AIQueryRequest, db: Session = Depends(get_db)):
             .all()
         )
         batch_summary = []
-        for b, m_name, m_unit in batches:
-            batch_summary.append(f"- Lô {b.batch_number} ({m_name}): Còn {b.quantity} {m_unit}, HSD: {b.expiry_date}")
+        for batch_num, b_qty, exp_date, m_name, m_unit in batches:
+            batch_summary.append(f"- Lô {batch_num} ({m_name}): Còn {b_qty} {m_unit or 'đơn vị'}, HSD: {exp_date}")
         batches_context = "\n".join(batch_summary) if batch_summary else "Hiện chưa có thông tin lô hàng."
 
-        # 3. Thiết lập System Instruction kết hợp dữ liệu thực tế
         system_instruction = (
             "Bạn là trợ lý AI chuyên gia y tế và quản lý dược học cho hệ thống nhà thuốc.\n"
             "DƯỚI ĐÂY LÀ DỮ LIỆU THỰC TẾ TRONG KHO THUỐC CỦA NHÀ THUỐC HIỆN TẠI:\n\n"
@@ -72,7 +103,7 @@ def consult_ai(request: AIQueryRequest, db: Session = Depends(get_db)):
         )
         
         response = client.models.generate_content(
-            model='gemini-2.5-flash',
+            model='gemini-3.6-flash',
             contents=f"{system_instruction}\n\nCâu hỏi từ người dùng: {request.prompt}"
         )
         
@@ -84,8 +115,7 @@ def consult_ai(request: AIQueryRequest, db: Session = Depends(get_db)):
 @router.post("/check-interactions")
 def check_drug_interactions(request: InteractionCheckRequest):
     """
-    Phân tích tương tác chéo giữa các loại thuốc trong giỏ hàng trước khi xuất đơn.
-    Trả về định dạng JSON có cấu trúc để hiển thị huy hiệu cảnh báo trên giao diện POS.
+    Phân tích tương tác chéo giữa các loại thuốc trong giỏ hàng POS (AI Guardrail).
     """
     if len(request.medicines) < 2:
         return {
@@ -109,16 +139,16 @@ Hãy phân tích tương tác chéo giữa danh sách các loại thuốc sau tr
 
 YÊU CẦU:
 1. Đánh giá xem giữa các thuốc này có tương tác đối kháng, tăng độc tính, trùng lặp hoạt chất hoặc chống chỉ định nguy hiểm hay không.
-2. Trả về DUY NHẤT một chuỗi JSON hợp lệ (không kèm Markdown code block hay giải thích ngoài JSON) theo đúng cấu trúc sau:
+2. Trả về DUY NHẤT một chuỗi JSON hợp lệ (không kèm Markdown block) theo cấu trúc:
 {{
     "has_interaction": true hoặc false,
-    "severity": "safe" (an toàn) | "warning" (cần lưu ý/theo dõi) | "danger" (nguy hiểm/chống chỉ định),
+    "severity": "safe" | "warning" | "danger",
     "summary": "Tóm tắt ngắn gọn 1-2 câu về tương tác chính",
-    "details": "Chi tiết cơ chế tương tác, rủi ro cụ thể và hướng xử lý/thay thế cho dược sĩ"
+    "details": "Chi tiết cơ chế tương tác, rủi ro cụ thể và hướng xử lý"
 }}
 """
         response = client.models.generate_content(
-            model='gemini-2.5-flash',
+            model='gemini-3.6-flash',
             contents=prompt
         )
 
@@ -139,3 +169,77 @@ YÊU CẦU:
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Lỗi phân tích tương tác thuốc: {str(e)}")
+
+@router.post("/scan-medicine-image")
+async def scan_medicine_image(file: UploadFile = File(...)):
+    """
+    AI Vision: Phân tích ảnh vỏ hộp / bao bì thuốc bằng Gemini Flash Multimodal,
+    tự động trích xuất các trường thông tin chuẩn GPP để điền vào form thuốc mới.
+    """
+    try:
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            raise HTTPException(status_code=500, detail="Thiếu cấu hình GEMINI_API_KEY.")
+
+        client = genai.Client(api_key=api_key)
+
+        # 1. Lưu file ảnh vào thư mục upload
+        file_ext = Path(file.filename).suffix or ".jpg"
+        unique_name = f"scan_{uuid.uuid4().hex[:10]}{file_ext}"
+        save_path = UPLOAD_DIR / unique_name
+
+        image_bytes = await file.read()
+        with open(save_path, "wb") as buffer:
+            buffer.write(image_bytes)
+
+        image_url = f"/uploads/medicines/{unique_name}"
+
+        # 2. Tạo prompt yêu cầu AI Vision trích xuất thông tin
+        prompt = """
+Bạn là chuyên gia AI Dược học thị giác chuyên đọc và phân tích bao bì thuốc tân dược chuẩn GPP.
+Hãy đọc kỹ hình ảnh bao bì / vỏ hộp thuốc được cung cấp và trích xuất các thông tin sau:
+
+YÊU CẦU:
+1. Trích xuất chính xác, trung thực các trường thông tin nhìn thấy được trên bao bì.
+2. Trả về DUY NHẤT một chuỗi JSON hợp lệ (không kèm Markdown code block hay văn bản khác) theo cấu trúc:
+{
+    "name": "Tên thương mại của thuốc kèm hàm lượng chính (ví dụ: Panadol Extra 500mg/65mg)",
+    "registration_number": "Số đăng ký lưu hành nếu thấy (ví dụ: VD-25219-16 hoặc VN-...)",
+    "ingredients": "Thành phần hoạt chất và hàm lượng (ví dụ: Paracetamol 500mg, Caffeine 65mg)",
+    "dosage_form": "Dạng bào chế (ví dụ: Viên nén bao phim, Viên nang mềm, Gói bột pha hỗn dịch uống...)",
+    "packaging": "Quy cách đóng gói (ví dụ: Hộp 15 vỉ x 12 viên, Chai 100ml...)",
+    "unit": "Đơn vị tính cơ bản nhất (Hộp, Vỉ, Viên, Chai, Ống, Gói)",
+    "manufacturer": "Tên công ty sản xuất",
+    "country": "Nước sản xuất (ví dụ: Việt Nam, Pháp, Ấn Độ...)",
+    "category_suggestion": "Gợi ý phân loại nhóm thuốc (ví dụ: Giảm đau - Hạ sốt, Kháng sinh, Tiêu hóa...)",
+    "expiry_date": "Hạn sử dụng ở định dạng YYYY-MM-DD nếu thấy trên ảnh (hoặc null nếu không thấy)",
+    "estimated_price": 0.0,
+    "description": "Tóm tắt ngắn gọn 1-2 câu về công dụng chính, chỉ định và chống chỉ định quan trọng"
+}
+"""
+
+        # 3. Gửi ảnh trực tiếp tới Gemini 3.6 Flash
+        mime_type = file.content_type or "image/jpeg"
+        image_part = types.Part.from_bytes(data=image_bytes, mime_type=mime_type)
+
+        response = client.models.generate_content(
+            model='gemini-3.6-flash',
+            contents=[image_part, prompt]
+        )
+
+        raw_text = response.text.strip()
+        cleaned_text = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_text, flags=re.MULTILINE).strip()
+
+        try:
+            parsed_data = json.loads(cleaned_text)
+        except json.JSONDecodeError:
+            parsed_data = {
+                "name": "",
+                "description": raw_text
+            }
+
+        parsed_data["image_url"] = image_url
+        return parsed_data
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Lỗi AI Vision đọc ảnh thuốc: {str(e)}")
